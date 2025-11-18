@@ -1,12 +1,12 @@
 package ass1.worker;
 
+import java.util.List;
+
 import ass1.common.MessageFormatter;
 import ass1.common.MessageFormatter.AnalyzeFields;
 import ass1.common.MessageType;
 import ass1.common.SqsHelper;
 import software.amazon.awssdk.services.sqs.model.Message;
-
-import java.util.List;
 
 public class Worker {
 
