@@ -10,7 +10,7 @@ import java.util.List;
 public class SqsHelper {
 
     private static final Region region = Region.US_EAST_1; 
-    private static final SqsClient sqs = SqsClient.builder().region(region).build();
+    private static final SqsClient sqs = AWS.getInstance().sqs();
 
     public static void sendMessage(String queueUrl, String message) {
         SendMessageRequest request = SendMessageRequest.builder()

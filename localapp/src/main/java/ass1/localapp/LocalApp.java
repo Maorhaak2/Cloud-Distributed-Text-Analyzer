@@ -1,61 +1,76 @@
 package ass1.localapp;
 
-import ass1.common.MessageFormatter;
-import ass1.common.MessageFormatter.SummaryDoneFields;
-import ass1.common.MessageFormatter.NewTaskFields;
-import ass1.common.MessageType;
+import ass1.common.AWS;
+import ass1.common.Ec2Helper;
+import ass1.common.S3Helper;
 import ass1.common.SqsHelper;
-import software.amazon.awssdk.services.sqs.model.Message;
 
+import java.io.File;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 
+import software.amazon.awssdk.services.sqs.model.Message;
+
 public class LocalApp {
+    public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: java LocalApp <input.txt> <n> <output.txt> [terminate]");
+            return;
+        }
 
-    private static final String TASKS_QUEUE_NAME = "tasks-queue";
+        String inputPath = args[0];
+        String outputPath = args[1];
+        int n = Integer.parseInt(args[2]);
+        boolean terminate = args.length >= 4 && (args[3] == "terminate" || args[3] == "TERMINATE");
 
-    public static void main(String[] args) {
 
-        String clientId = UUID.randomUUID().toString();
-        String callbackQueueName = "response-" + clientId;
-        String callbackQueueUrl = SqsHelper.createQueueIfNotExists(callbackQueueName);
-        System.out.println("[INFO] Created callback queue: " + callbackQueueName);
+        // Generate unique response queue name
+        String responseQueueName = "response-" + UUID.randomUUID();
+        String responseQueueUrl = SqsHelper.createQueueIfNotExists(responseQueueName);
+        System.out.println("[INFO] Created callback queue: " + responseQueueName);
 
-        String tasksQueueUrl = SqsHelper.createQueueIfNotExists(TASKS_QUEUE_NAME);
+        // Start manager EC2 if needed
+        if (!Ec2Helper.isManagerRunning()) {
+            System.out.println("[INFO] No manager detected. Starting one now...");
+            Ec2Helper.startManagerInstance();
+        }
 
-        String fakeInputS3 = "s3://placeholder/input.txt";
-        int fakeN = 5;
+        // Upload input file to S3
+        String bucketName = AWS.getInstance().bucketName;
+        String s3Key = "input/" + UUID.randomUUID() + ".txt";
+        S3Helper.uploadFile(bucketName, s3Key, Path.of(inputPath));
+        System.out.println("[INFO] Uploaded input file to S3: " + s3Key);
 
-        String message = MessageFormatter.formatNewTask(fakeInputS3, fakeN, callbackQueueName);
-        System.out.println("[DEBUG] Sending NEW_TASK message: " + message);
+        // Send NEW_TASK message to manager
+        String messageBody = terminate
+                ? "TERMINATE\t" + responseQueueName
+                : "NEW_TASK\t" + "s3://" + bucketName + "/" + s3Key + "\t" + n + "\t" + responseQueueName;
+        String tasksQueueUrl = SqsHelper.createQueueIfNotExists("tasks-queue");
+        SqsHelper.sendMessage(tasksQueueUrl, messageBody);
+        System.out.println("[INFO] Sent message to manager: " + messageBody);
 
-        SqsHelper.sendMessage(tasksQueueUrl, message);
-        System.out.println("[INFO] NEW_TASK message sent to: " + TASKS_QUEUE_NAME);
-
-        System.out.println("[INFO] Waiting for response on: " + callbackQueueName);
-        while (true) {
-            List<Message> messages = SqsHelper.receiveMessages(callbackQueueUrl, 5);
-
+        // Wait for summary response on response queue
+        System.out.println("[INFO] Waiting for summary on queue: " + responseQueueName);
+        boolean received = false;
+        while (!received) {
+            List<Message> messages = SqsHelper.receiveMessages(responseQueueUrl, 5);
             for (Message msg : messages) {
-                String body = msg.body();
-                MessageType type = MessageFormatter.getMessageType(body);
-
-                if (type == MessageType.SUMMARY_DONE) {
-                    SummaryDoneFields summary = MessageFormatter.parseSummaryDone(body);
-                    System.out.println("=== SUMMARY RECEIVED ===");
-                    System.out.println("Job ID: " + summary.jobId());
-                    System.out.println("Summary file location: " + summary.summaryS3Path());
-
-                    SqsHelper.deleteMessage(callbackQueueUrl, msg.receiptHandle());
-                    return;
+                if (msg.body().startsWith("SUMMARY_DONE")) {
+                    String[] parts = msg.body().split("\t");
+                    String summaryKey = parts[1];
+                    S3Helper.downloadFile(bucketName, summaryKey, Path.of(outputPath));
+                    System.out.println("[INFO] Downloaded summary to: " + outputPath);
+                    SqsHelper.deleteMessage(responseQueueUrl, msg.receiptHandle());
+                    received = true;
+                    break;
                 } else {
-                    System.out.println("[WARN] Received unrelated message: " + body);
+                    SqsHelper.deleteMessage(responseQueueUrl, msg.receiptHandle());
                 }
             }
-
-            try {
-                Thread.sleep(2000);
-            } catch (InterruptedException ignored) { }
+            Thread.sleep(2000); // Poll every 2 seconds
         }
+
+        System.out.println("[INFO] LocalApp finished.");
     }
 }
