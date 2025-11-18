@@ -49,7 +49,7 @@ public class Worker {
 
             try {
                 Thread.sleep(1000);
-            } catch (InterruptedException ignored) {}
+            } catch (InterruptedException ignored  ) {}
         }
     }
 }
