@@ -25,13 +25,6 @@ public class Ec2Helper {
     private static final String iamProfile = "LabInstanceProfile";
     private static final String workerTagName = "Worker";
 
-    private static final String MANAGER_USER_DATA =
-        "#!/bin/bash\n" +
-        "sudo apt-get update -y\n" +
-        "sudo apt-get install -y default-jdk\n" +
-        "aws s3 cp s3://your-bucket/manager.jar /home/ubuntu/manager.jar\n" +
-        "java -jar /home/ubuntu/manager.jar > /home/ubuntu/manager.log 2>&1";
-
     public static boolean isManagerRunning() {
         DescribeInstancesRequest request = DescribeInstancesRequest.builder()
                 .filters(
@@ -117,14 +110,14 @@ public class Ec2Helper {
         }
 
      public static String startWorkerInstance() {
-        String userData = Base64.getEncoder().encodeToString(
-                ("#!/bin/bash\n" +
+        String bucket = AWS.getInstance().bucketName;
+
+        String userData =
+                "#!/bin/bash\n" +
                 "sudo apt-get update -y\n" +
-                "sudo apt-get install -y default-jdk\n" +
-                "aws s3 cp s3://your-bucket/worker.jar /home/ubuntu/worker.jar\n" +
-                "java -jar /home/ubuntu/worker.jar > /home/ubuntu/worker.log 2>&1")
-                .getBytes()
-        );
+                "sudo apt-get install -y default-jdk awscli\n" +
+                "aws s3 cp s3://" + bucket + "/worker/worker.jar /home/ubuntu/worker.jar\n" +
+                "java -jar /home/ubuntu/worker.jar > /home/ubuntu/worker.log 2>&1\n";
 
         RunInstancesRequest runReq = RunInstancesRequest.builder()
                 .imageId(ami)
@@ -134,20 +127,21 @@ public class Ec2Helper {
                 .keyName(keyName)
                 .iamInstanceProfile(IamInstanceProfileSpecification.builder()
                         .name(iamProfile).build())
-                .userData(userData)
+                .userData(Base64.getEncoder().encodeToString(userData.getBytes()))
                 .build();
 
         RunInstancesResponse res = ec2.runInstances(runReq);
-        String id = res.instances().get(0).instanceId();
+        String instanceId = res.instances().get(0).instanceId();
 
         ec2.createTags(CreateTagsRequest.builder()
-                .resources(id)
+                .resources(instanceId)
                 .tags(Tag.builder().key("Name").value(workerTagName).build())
                 .build());
 
-        System.out.println("[EC2] Worker instance created: " + id);
-        return id;
+        System.out.println("[EC2] Worker instance created: " + instanceId);
+        return instanceId;
         }
+
 
     public static void terminateAllWorkers() {
         DescribeInstancesRequest request = DescribeInstancesRequest.builder()
