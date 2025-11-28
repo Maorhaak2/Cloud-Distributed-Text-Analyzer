@@ -19,135 +19,178 @@ import software.amazon.awssdk.services.ec2.model.TerminateInstancesRequest;
 public class Ec2Helper {
 
     private static final Ec2Client ec2 = AWS.getInstance().ec2();
+
     private static final String managerTagName = "Manager";
-    private static final String ami = "ami-00e95a9222311e8ed"; 
-    private static final String keyName = "vockey"; // חשוב שיהיה קיים
-    private static final String iamProfile = "LabInstanceProfile";
-    private static final String workerTagName = "Worker";
+    private static final String workerTagName  = "Worker";
+    private static final String ami = "ami-0c398cb65a93047f2"; // AMI מעודכן
+    private static final String keyName = "vockey"; 
+    private static final String iamProfile = "LabInstanceProfile"; 
+    
+    // סוג מופע T3_MICRO
+    private static final InstanceType INSTANCE_TYPE = InstanceType.T3_MICRO;
 
-    public static boolean isManagerRunning() {
-        DescribeInstancesRequest request = DescribeInstancesRequest.builder()
-                .filters(
-                        Filter.builder().name("tag:Name").values(managerTagName).build(),
-                        Filter.builder().name("instance-state-name").values("pending", "running").build()
-                ).build();
-
-        DescribeInstancesResponse response = ec2.describeInstances(request);
-        return response.reservations().stream() 
-                .anyMatch(res -> !res.instances().isEmpty());
-    }
-
-    public static String startManagerInstance() {
+    // ---------------------------------------------------------
+    //  USER DATA BUILDER — משותף למנג'ר ולוורקר
+    // ---------------------------------------------------------
+    private static String buildUserData(String jarS3Path, String outputJarName) {
         String bucket = AWS.getInstance().bucketName;
 
-        String userData =
+        String script =
                 "#!/bin/bash\n" +
                 "sudo apt-get update -y\n" +
-                "sudo apt-get install -y default-jdk awscli\n" +
-                "aws s3 cp s3://" + bucket + "/manager/manager.jar /home/ubuntu/manager.jar\n" +
-                "java -jar /home/ubuntu/manager.jar > /home/ubuntu/manager.log 2>&1\n";
+                "sudo apt-get install -y openjdk-17-jre-headless unzip curl\n" +
+
+                "# Install AWS CLI v2\n" +
+                "curl \"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip\" -o \"awscliv2.zip\"\n" +
+                "unzip awscliv2.zip\n" +
+                "sudo ./aws/install\n" +
+
+                "mkdir -p /home/ubuntu\n" +
+                "cd /home/ubuntu\n" +
+
+                "aws s3 cp s3://" + bucket + "/" + jarS3Path + " " + outputJarName + "\n" +
+
+                "nohup java -jar " + outputJarName + " > run.log 2>&1 &\n";
+
+        return Base64.getEncoder().encodeToString(script.getBytes());
+    }
+
+
+    public static boolean isManagerRunning() {
+        List<Instance> managers = getRunningInstances("Manager");
+
+        return !managers.isEmpty();
+    }
+
+    public static List<Instance> getRunningInstances(String tagName) {
+        DescribeInstancesRequest req = DescribeInstancesRequest.builder()
+                .filters(
+                        Filter.builder().name("tag:Name").values(tagName).build(),
+                        Filter.builder().name("instance-state-name")
+                                .values("pending", "running").build()
+                )
+                .build();
+
+        DescribeInstancesResponse res = ec2.describeInstances(req);
+
+        return res.reservations().stream()
+                .flatMap(r -> r.instances().stream())
+                .toList();
+    }
+
+
+    // ---------------------------------------------------------
+    //  START MANAGER
+    // ---------------------------------------------------------
+    public static String startManagerInstance() {
+
+        String userData = buildUserData("manager/manager.jar", "manager.jar");
 
         RunInstancesRequest runRequest = RunInstancesRequest.builder()
-                .instanceType(InstanceType.T2_MICRO)
                 .imageId(ami)
-                .maxCount(1)
+                .instanceType(INSTANCE_TYPE)
                 .minCount(1)
+                .maxCount(1)
                 .keyName(keyName)
                 .iamInstanceProfile(IamInstanceProfileSpecification.builder()
                         .name(iamProfile).build())
-                .userData(Base64.getEncoder().encodeToString(userData.getBytes()))
+                .userData(userData)
                 .build();
 
-        RunInstancesResponse response = ec2.runInstances(runRequest);
-        String instanceId = response.instances().get(0).instanceId();
+        RunInstancesResponse res = ec2.runInstances(runRequest);
+        String instanceId = res.instances().get(0).instanceId();
 
+        // Tag the instance
         CreateTagsRequest tagRequest = CreateTagsRequest.builder()
                 .resources(instanceId)
                 .tags(Tag.builder().key("Name").value(managerTagName).build())
                 .build();
-
         ec2.createTags(tagRequest);
 
         System.out.println("[EC2] Manager instance created: " + instanceId);
         return instanceId;
-        }
+    }
 
+    // ---------------------------------------------------------
+    //  START WORKER
+    // ---------------------------------------------------------
+    public static String startWorkerInstance() {
+        String userData = buildUserData("worker/worker.jar", "worker.jar");
 
+        RunInstancesRequest runRequest = RunInstancesRequest.builder()
+                .imageId(ami)
+                .instanceType(INSTANCE_TYPE)
+                .minCount(1)
+                .maxCount(1)
+                .keyName(keyName)
+                .iamInstanceProfile(IamInstanceProfileSpecification.builder()
+                        .name(iamProfile).build())
+                .userData(userData)
+                .build();
+
+        RunInstancesResponse res = ec2.runInstances(runRequest);
+        String id = res.instances().get(0).instanceId();
+
+        ec2.createTags(CreateTagsRequest.builder()
+                .resources(id)
+                .tags(Tag.builder().key("Name").value(workerTagName).build())
+                .build());
+
+        System.out.println("[EC2] Worker instance created: " + id);
+        return id;
+    }
+
+    // ---------------------------------------------------------
+    //  CREATE WORKERS ONLY IF NEEDED
+    // ---------------------------------------------------------
     public static void createWorkersIfNeeded(int requiredCount) {
-        // 1. Count currently running workers
-        DescribeInstancesRequest request = DescribeInstancesRequest.builder()
+
+        // 1. Count running workers
+        DescribeInstancesRequest req = DescribeInstancesRequest.builder()
                 .filters(
-                        Filter.builder().name("tag:Name").values("Worker").build(),
+                        Filter.builder().name("tag:Name").values(workerTagName).build(),
                         Filter.builder().name("instance-state-name")
-                                .values("running", "pending").build()
+                                .values("pending", "running").build()
                 ).build();
 
-        List<Instance> workers = ec2.describeInstances(request)
+        List<Instance> workers = ec2.describeInstances(req)
                 .reservations().stream()
-                .flatMap(res -> res.instances().stream())
+                .flatMap(r -> r.instances().stream())
                 .toList();
 
         int running = workers.size();
         int missing = requiredCount - running;
 
         if (missing <= 0) {
-                System.out.println("[EC2] Enough workers running (" + running + ")");
-                return;
+            System.out.println("[EC2] Enough workers running. Currently: " + running);
+            return;
         }
 
-        // Respect the limit of 19 total workers
-        missing = Math.min(missing, 19 - running);
+        // Max 19 instances (Manager + Workers). We limit Workers to 17 if Manager is 1.
+        // We assume the Manager itself is running (1 instance).
+        missing = Math.min(missing, 18 - running); // Changed from 17-running to 18-running based on 19 total limit. Manager is 1.
         if (missing <= 0) {
-                System.out.println("[EC2] Worker limit reached (19). Not creating more.");
-                return;
+            System.out.println("[EC2] Max worker count reached. Not creating more.");
+            return;
         }
 
-        System.out.println("[EC2] Creating " + missing + " worker(s)");
+        System.out.println("[EC2] Creating " + missing + " new worker(s).");
 
         for (int i = 0; i < missing; i++) {
-                startWorkerInstance();
+            startWorkerInstance();
         }
-        }
+    }
 
-     public static String startWorkerInstance() {
-        String bucket = AWS.getInstance().bucketName;
-
-        String userData =
-                "#!/bin/bash\n" +
-                "sudo apt-get update -y\n" +
-                "sudo apt-get install -y default-jdk awscli\n" +
-                "aws s3 cp s3://" + bucket + "/worker/worker.jar /home/ubuntu/worker.jar\n" +
-                "java -jar /home/ubuntu/worker.jar > /home/ubuntu/worker.log 2>&1\n";
-
-        RunInstancesRequest runReq = RunInstancesRequest.builder()
-                .imageId(ami)
-                .instanceType(InstanceType.T2_MICRO)
-                .minCount(1)
-                .maxCount(1)
-                .keyName(keyName)
-                .iamInstanceProfile(IamInstanceProfileSpecification.builder()
-                        .name(iamProfile).build())
-                .userData(Base64.getEncoder().encodeToString(userData.getBytes()))
-                .build();
-
-        RunInstancesResponse res = ec2.runInstances(runReq);
-        String instanceId = res.instances().get(0).instanceId();
-
-        ec2.createTags(CreateTagsRequest.builder()
-                .resources(instanceId)
-                .tags(Tag.builder().key("Name").value(workerTagName).build())
-                .build());
-
-        System.out.println("[EC2] Worker instance created: " + instanceId);
-        return instanceId;
-        }
-
-
+    // ---------------------------------------------------------
+    //  TERMINATE ALL WORKERS
+    // ---------------------------------------------------------
     public static void terminateAllWorkers() {
         DescribeInstancesRequest request = DescribeInstancesRequest.builder()
                 .filters(
-                        Filter.builder().name("tag:Name").values("Worker").build(),
-                        Filter.builder().name("instance-state-name").values("running", "pending").build()
+                        Filter.builder().name("tag:Name").values(workerTagName).build(),
+                        Filter.builder().name("instance-state-name").values(
+                                "running","pending"
+                        ).build()
                 ).build();
 
         List<Instance> workers = ec2.describeInstances(request)
@@ -155,12 +198,18 @@ public class Ec2Helper {
                 .flatMap(r -> r.instances().stream())
                 .toList();
 
-        if (!workers.isEmpty()) {
-            List<String> ids = workers.stream().map(Instance::instanceId).toList();
-            TerminateInstancesRequest terminateRequest = TerminateInstancesRequest.builder()
-                    .instanceIds(ids).build();
-            ec2.terminateInstances(terminateRequest);
-            System.out.println("[EC2] Terminated " + ids.size() + " worker(s).");
+        if (workers.isEmpty()) {
+            System.out.println("[EC2] No workers to terminate.");
+            return;
         }
+
+        List<String> ids = workers.stream().map(Instance::instanceId).toList();
+
+        TerminateInstancesRequest termReq = TerminateInstancesRequest.builder()
+                .instanceIds(ids)
+                .build();
+
+        ec2.terminateInstances(termReq);
+        System.out.println("[EC2] Terminated " + ids.size() + " workers.");
     }
 }

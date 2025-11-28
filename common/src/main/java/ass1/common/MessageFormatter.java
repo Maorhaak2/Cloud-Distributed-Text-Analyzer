@@ -4,17 +4,19 @@ public class MessageFormatter {
 
     private static final String TAB = "\t";
 
-    public static MessageType getMessageType(String body) {
-        String typeToken = body.split(TAB, 2)[0];
-        return MessageType.valueOf(typeToken);
+    public static MessageType getMessageType(String message) {
+        String[] parts = message.trim().split("\\s+");
+        System.out.println("[test] " + parts[0]);
+        return MessageType.valueOf(parts[0]);
     }
+
 
     // ----------------------------------------------------
     //  LOCALAPP  → MANAGER
     // ----------------------------------------------------
 
     public static String formatNewTask(String inputFileS3Path,
-                                       int n,
+                                       int n,   
                                        String callbackQueueName) {
 
         return MessageType.NEW_TASK + TAB  

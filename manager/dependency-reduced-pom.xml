@@ -6,9 +6,9 @@
     <version>1.0-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
-  <groupId>ass1.worker</groupId>
-  <artifactId>worker</artifactId>
-  <name>worker</name>
+  <groupId>ass1.manager</groupId>
+  <artifactId>manager</artifactId>
+  <name>manager</name>
   <version>1.0-SNAPSHOT</version>
   <build>
     <plugins>
@@ -33,7 +33,7 @@
             <configuration>
               <transformers>
                 <transformer>
-                  <mainClass>ass1.worker.Worker</mainClass>
+                  <mainClass>ass1.manager.Manager</mainClass>
                 </transformer>
               </transformers>
             </configuration>

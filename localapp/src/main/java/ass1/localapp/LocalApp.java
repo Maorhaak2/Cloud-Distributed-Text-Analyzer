@@ -4,13 +4,15 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 
+import ass1.common.AWS;
 import ass1.common.Ec2Helper;
+import ass1.common.MessageFormatter;
 import ass1.common.S3Helper;
 import ass1.common.SqsHelper;
 import software.amazon.awssdk.services.sqs.model.Message;
 
 public class LocalApp {
-    private static final String BUCKET_NAME = "text_jobs_bucket";
+    private static final String BUCKET_NAME = AWS.getInstance().bucketName;
 
     public static void main(String[] args) throws Exception {
         if (args.length < 3) {
@@ -21,7 +23,8 @@ public class LocalApp {
         String inputPath = args[0];
         String outputPath = args[1];
         int n = Integer.parseInt(args[2]);
-        boolean terminate = args.length >= 4 && (args[3] == "terminate" || args[3] == "TERMINATE");
+        // LocalApp.java - קוד מתוקן
+        boolean terminate = args.length >= 4 && "terminate".equalsIgnoreCase(args[3]);
 
 
         // Generate unique response queue name
@@ -43,8 +46,13 @@ public class LocalApp {
 
         // Send NEW_TASK message to manager
         String messageBody = terminate
-                ? "TERMINATE\t" + responseQueueName
-                : "NEW_TASK\t" + "s3://" + BUCKET_NAME + "/" + s3Key + "\t" + n + "\t" + responseQueueName;
+        ? MessageFormatter.formatTerminate(responseQueueName)
+        : MessageFormatter.formatNewTask(
+                "s3://" + BUCKET_NAME + "/" + s3Key,
+                n,
+                responseQueueName
+        );
+
         String tasksQueueUrl = SqsHelper.createQueueIfNotExists("tasks-queue");
         SqsHelper.sendMessage(tasksQueueUrl, messageBody);
         System.out.println("[INFO] Sent message to manager: " + messageBody);
@@ -55,9 +63,14 @@ public class LocalApp {
         while (!received) {
             List<Message> messages = SqsHelper.receiveMessages(responseQueueUrl, 5);
             for (Message msg : messages) {
+                System.out.println("[DEBUG] Received message: '" + msg.body() + "'");
                 if (msg.body().startsWith("SUMMARY_DONE")) {
-                    String[] parts = msg.body().split("\t");
-                    String summaryKey = parts[1];
+                    System.out.println("[DEBUG] Parsing SUMMARY_DONE message: " + msg.body());
+
+                    String[] parts = msg.body().trim().split("\\s+");
+                    String summaryKey = parts[2];
+                    System.out.println("[DEBUG] Extracted summary key: " + summaryKey);
+
                     S3Helper.downloadFile(BUCKET_NAME, summaryKey, Path.of(outputPath));
                     System.out.println("[INFO] Downloaded summary to: " + outputPath);
                     SqsHelper.deleteMessage(responseQueueUrl, msg.receiptHandle());

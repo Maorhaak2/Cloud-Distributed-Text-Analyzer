@@ -9,247 +9,265 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import ass1.common.*;
+import ass1.common.AWS;
+import ass1.common.Ec2Helper;
+import ass1.common.HtmlBuilder;
+import ass1.common.MessageFormatter;
+import ass1.common.MessageType;
+import ass1.common.S3Helper;
+import ass1.common.SqsHelper;
 import software.amazon.awssdk.services.sqs.model.Message;
 
 public class Manager {
 
-    // ----------------------------------------------------
-    //  CONSTANTS & CONFIG
-    // ----------------------------------------------------
     private static final String MANAGER_INPUT_QUEUE = "tasks-queue";
     private static final String WORKER_TASKS_QUEUE = "worker-tasks-queue";
     private static final String WORKER_RESULTS_QUEUE = "worker-results-queue";
 
-    // SQS URLs (filled in constructor)
     private final String managerInputQueueUrl;
     private final String workerTasksQueueUrl;
     private final String workerResultsQueueUrl;
 
-    // Executor for parallel Job handling
-    private final ExecutorService jobExecutor;
+    // ======================================================================
+    // SINGLE ThreadPool for all job tasks (NEW_TASK + TERMINATE)
+    // ======================================================================
+    private final ExecutorService jobPool = Executors.newFixedThreadPool(10);
 
-    // Tracks all active jobs
-    private final ConcurrentHashMap<String, Job> jobs;
-
-    // Control flags
+    private final ConcurrentHashMap<String, Job> jobs = new ConcurrentHashMap<>();
     private volatile boolean acceptingNewTasks = true;
 
-    public Manager() {
 
-        // Create/get queues
+    public Manager() {
         this.managerInputQueueUrl = SqsHelper.createQueueIfNotExists(MANAGER_INPUT_QUEUE);
         this.workerTasksQueueUrl = SqsHelper.createQueueIfNotExists(WORKER_TASKS_QUEUE);
         this.workerResultsQueueUrl = SqsHelper.createQueueIfNotExists(WORKER_RESULTS_QUEUE);
-
-        // Thread pool for parallel jobs
-        this.jobExecutor = Executors.newFixedThreadPool(10);
-
-        // Job state map
-        this.jobs = new ConcurrentHashMap<>();
     }
 
 
-    // ----------------------------------------------------
-    //   NESTED JOB CLASS (STATE HOLDER ONLY)
-    // ----------------------------------------------------
     private static class Job {
         final String jobId;
-        final String inputFileS3;
-        final int n;
         final String callbackQueue;
         final int totalTasks;
-
         final ConcurrentHashMap<String, String> results = new ConcurrentHashMap<>();
         final AtomicInteger completed = new AtomicInteger(0);
         final CompletableFuture<Void> finished = new CompletableFuture<>();
 
-        Job(String jobId, String inputFileS3, int n, String callbackQueue, int totalTasks){
+        Job(String jobId, String callbackQueue, int totalTasks) {
             this.jobId = jobId;
-            this.inputFileS3 = inputFileS3;
-            this.n = n;
             this.callbackQueue = callbackQueue;
             this.totalTasks = totalTasks;
         }
     }
 
-    // ----------------------------------------------------
-    //  MAIN ENTRY POINT
-    // ----------------------------------------------------
+
     public static void main(String[] args) {
-        Manager manager = new Manager();
-        manager.start();
+        new Manager().start();
     }
 
-    // Start the manager (starts listeners)
-    public void start() {
-        // TODO – add listeners in next steps
-        System.out.println("[Manager] Manager started.");
 
+    public void start() {
+        System.out.println("[Manager] Manager started.");
         startLocalAppListener();
         startWorkerResultsListener();
     }
 
-    // ----------------------------------------------------
-    //   PLACEHOLDER FOR LISTENERS
-    // ----------------------------------------------------
+
+    // ========================================================================
+    // LISTENER: LOCALAPP INPUT
+    // ========================================================================
     private void startLocalAppListener() {
-    Thread t = new Thread(new Runnable() {
-        @Override
-        public void run() {
+        Thread t = new Thread(() -> {
             System.out.println("[Manager] LocalApp Listener started.");
-            
-            while (acceptingNewTasks) {
+
+            while (acceptingNewTasks || !jobs.isEmpty()) {
+
                 try {
-                    // מקבל עד 10 הודעות בפול ארוך
                     List<Message> messages = SqsHelper.receiveMessages(managerInputQueueUrl, 10);
-                    
+
                     for (Message msg : messages) {
-                        String body = msg.body();
-                        MessageType type = MessageFormatter.getMessageType(body);
-                        
+
+                        MessageType type = MessageFormatter.getMessageType(msg.body());
+
                         switch (type) {
-                            
+
                             case NEW_TASK -> {
-                                System.out.println("[Manager] Received NEW_TASK");
-                                jobExecutor.submit(() -> handleNewTask(msg));
+                                if (acceptingNewTasks) {
+                                    System.out.println("[Manager] NEW_TASK received");
+
+                                    // submit NEW_TASK to jobPool
+                                    jobPool.submit(() -> handleNewTask(msg));
+
+                                } else {
+                                    System.out.println("[Manager] Ignoring NEW_TASK (termination mode)");
+                                }
                             }
-                            
+
                             case TERMINATE -> {
-                                System.out.println("[Manager] Received TERMINATE");
-                                handleTerminate(msg);   // נעשה בזה שלב נפרד
+                                System.out.println("[Manager] TERMINATE received");
+
+                                // submit TERMINATE to jobPool
+                                jobPool.submit(() -> handleTerminate(msg));
                             }
                         }
-                        
-                        // מוחק את ההודעה מהתור
+
                         SqsHelper.deleteMessage(managerInputQueueUrl, msg.receiptHandle());
                     }
-                    
+
                 } catch (Exception e) {
-                    System.err.println("[Manager] Error in LocalApp Listener: " + e.getMessage());
                     e.printStackTrace();
                 }
             }
-            
+
+            jobPool.shutdown();
             System.out.println("[Manager] LocalApp Listener stopped.");
-        }
-    });
+        });
 
-    t.setDaemon(true);  // what?????????????????????????????????????????????????????
-    t.start();
-}
+        t.start();
+    }
 
 
+    // ========================================================================
+    // LISTENER: WORKER RESULTS
+    // ========================================================================
     private void startWorkerResultsListener() {
-        // Stage 3 will implement
+        Thread t = new Thread(() -> {
+            System.out.println("[Manager] WorkerResults Listener started.");
+
+            while (acceptingNewTasks || !jobs.isEmpty()) {
+                try {
+                    List<Message> messages = SqsHelper.receiveMessages(workerResultsQueueUrl, 10);
+
+                    for (Message msg : messages) {
+                        handleWorkerDone(msg.body());
+                        SqsHelper.deleteMessage(workerResultsQueueUrl, msg.receiptHandle());
+                    }
+
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+
+            System.out.println("[Manager] WorkerResults Listener stopped.");
+        });
+
+        t.start();
     }
 
-    // ----------------------------------------------------
-    //   PLACEHOLDER FOR JOB HANDLING
-    // ----------------------------------------------------
+
+    // ========================================================================
+    // HANDLER: WORKER DONE
+    // ========================================================================
+    private void handleWorkerDone(String body) {
+        MessageFormatter.WorkerDoneFields f = MessageFormatter.parseWorkerDone(body);
+
+        Job job = jobs.get(f.jobId());
+        if (job == null)
+            return;
+        String jobKey = UUID.randomUUID().toString();
+        String value = f.analysisType() + "\t" + f.url() + "\t" + f.resultInfo();
+        job.results.put(jobKey, value);
+
+        int done = job.completed.incrementAndGet();
+        System.out.println("[Manager] Job " + job.jobId + ": " + done + "/" + job.totalTasks);
+
+        if (done == job.totalTasks) {
+            job.finished.complete(null);
+        }
+    }
+
+
+    // ========================================================================
+    // HANDLER: NEW TASK
+    // ========================================================================
     private void handleNewTask(Message msg) {
-    try {
-        // ---------------------------------------------
-        // 1. Parse the NEW_TASK message
-        // ---------------------------------------------
-        String body = msg.body();
-        MessageFormatter.NewTaskFields fields = MessageFormatter.parseNewTask(body);
 
-        String inputS3 = fields.inputFileS3();
-        int n = fields.n();
-        String callbackQueue = fields.callbackQueue();
+        try {
+            MessageFormatter.NewTaskFields f = MessageFormatter.parseNewTask(msg.body());
 
-        System.out.println("[Manager] Starting NEW_TASK: " + inputS3);
+            String fullS3 = f.inputFileS3();
+            String bucket = AWS.getInstance().bucketName;
+            String key = fullS3.substring(("s3://" + bucket + "/").length());
 
-        // ---------------------------------------------
-        // 2. Download the input file from S3
-        // ---------------------------------------------
-        String bucketName = AWS.getInstance().bucketName;  // תוודא שקיים אצלך
-        Path tempFile = Path.of("/tmp/" + UUID.randomUUID() + ".txt");
+            Path temp = Path.of("/tmp/" + UUID.randomUUID() + ".txt");
+            S3Helper.downloadFile(bucket, key, temp);
 
-        S3Helper.downloadFile(bucketName, inputS3, tempFile);
+            List<String> lines = java.nio.file.Files.readAllLines(temp);
 
-        // ---------------------------------------------
-        // 3. Parse lines → each represents a task
-        // Format: <analysisType> \t <url>
-        // ---------------------------------------------
-        List<String> lines = java.nio.file.Files.readAllLines(tempFile);
+            String jobId = UUID.randomUUID().toString();
+            Job job = new Job(jobId, f.callbackQueue(), lines.size());
+            jobs.put(jobId, job);
 
-        int totalTasks = lines.size();
-        String jobId = UUID.randomUUID().toString();
+            System.out.println("[Manager] Job created. " + lines.size() + " tasks.");
 
-        // Create Job object
-        Job job = new Job(jobId, inputS3, n, callbackQueue, totalTasks);
-        jobs.put(jobId, job);
+            // send worker tasks
+            for (String line : lines) {
+                String[] p = line.split("\t");
+                String msgOut = MessageFormatter.formatAnalyzeTask(p[0], p[1], jobId);
+                SqsHelper.sendMessage(workerTasksQueueUrl, msgOut);
+            }
 
-        System.out.println("[Manager] Job " + jobId + " loaded with " + totalTasks + " tasks.");
+            // create workers if needed
+            int neededWorkers = (int) Math.ceil(lines.size() / (double) f.n());
+            Ec2Helper.createWorkersIfNeeded(neededWorkers);
 
-        // ---------------------------------------------
-        // 4. Send each task to Worker queue
-        // ---------------------------------------------
-        for (String line : lines) {
-            String[] p = line.split("\t");
-            String analysisType = p[0];
-            String url = p[1];
+            // wait for completion, then finish job
+            job.finished.whenComplete((r, ex) -> finishJob(jobId, bucket));
 
-            String workerMsg = MessageFormatter.formatAnalyzeTask(
-                    analysisType,
-                    url,
-                    jobId
-            );
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 
-            SqsHelper.sendMessage(workerTasksQueueUrl, workerMsg);
+
+    // ========================================================================
+    // BUILD SUMMARY + SEND TO CLIENT
+    // ========================================================================
+    private void finishJob(String jobId, String bucket) {
+
+        try {
+            Job job = jobs.get(jobId);
+            if (job == null) return;
+
+            String html = HtmlBuilder.build(job.results);
+            Path out = Path.of("/tmp/" + jobId + ".html");
+
+            java.nio.file.Files.writeString(out, html);
+
+            String summaryKey = "summaries/" + jobId + ".html";
+            S3Helper.uploadFile(bucket, summaryKey, out);
+
+            String msg = MessageFormatter.formatSummaryDone(jobId, summaryKey);
+            SqsHelper.sendMessage(job.callbackQueue, msg);
+
+            System.out.println("[Manager] Summary sent for job " + jobId);
+
+            jobs.remove(jobId);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    // ========================================================================
+    // TERMINATE
+    // ========================================================================
+    private void handleTerminate(Message msg) {
+
+        acceptingNewTasks = false;
+
+        if (!jobs.isEmpty()) {
+            CompletableFuture.allOf(
+                    jobs.values().stream()
+                            .map(j -> j.finished)
+                            .toArray(CompletableFuture[]::new)
+            ).join();
         }
 
-        // ---------------------------------------------
-        // 5. Compute required workers
-        // ---------------------------------------------
-        int neededWorkers = (int) Math.ceil((double) totalTasks / n);
+        Ec2Helper.terminateAllWorkers();
+        System.out.println("[Manager] All workers terminated. Manager shutting down.");
 
-        System.out.println("[Manager] Job " + jobId + ": Need " + neededWorkers + " workers.");
-
-        // This method must be implemented in Ec2Helper by you
-        Ec2Helper.createWorkersIfNeeded(neededWorkers);
-
-        // ---------------------------------------------
-        // 6. Wait for workers to finish
-        // ---------------------------------------------
-        System.out.println("[Manager] Job " + jobId + " waiting for results...");
-        job.finished.join();   // waits efficiently (no CPU usage)
-
-        System.out.println("[Manager] Job " + jobId + " finished all tasks.");
-
-        // ---------------------------------------------
-        // 7. Build summary HTML
-        // ---------------------------------------------
-        String summaryHtml = HtmlBuilder.build(job.results);  // נכתוב בהמשך אם תרצה
-
-        String summaryKey = "summaries/" + jobId + ".html";
-        Path summaryFilePath = Path.of("/tmp/" + jobId + ".html");
-
-        java.nio.file.Files.writeString(summaryFilePath, summaryHtml);
-
-        S3Helper.uploadFile(bucketName, summaryKey, summaryFilePath);
-
-        // ---------------------------------------------
-        // 8. Send SUMMARY_DONE back to LocalApp
-        // ---------------------------------------------
-        String doneMsg = MessageFormatter.formatSummaryDone(jobId, summaryKey);
-        SqsHelper.sendMessage(job.callbackQueue, doneMsg);
-
-        System.out.println("[Manager] Summary sent to client for job " + jobId);
-
-        // cleanup
-        jobs.remove(jobId);
-
-    } catch (Exception e) {
-        System.err.println("[Manager] Error in handleNewTask: " + e.getMessage());
-        e.printStackTrace();
-    }
-}
-
-
-    private void handleTerminate(Message msg) {
-        // Stage 5 will implement
+        jobPool.shutdown();
+        System.exit(0);
     }
 }
