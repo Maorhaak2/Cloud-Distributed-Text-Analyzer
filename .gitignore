@@ -1,35 +1,75 @@
+##############################
+#   AWS & SECRETS (CRITICAL)
+##############################
+
+# AWS credentials folders (never commit!)
+.aws/
+aws/
+*credentials*
+*config*
+*.pem
+*.key
+*.p12
+*.csr
+*.crt
+*.der
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Secrets in text files (just in case)
+*secret*
+*password*
+*token*
+
+##############################
+#   MAVEN BUILD FILES
+##############################
 
 target/
-*/target/
-
-
+out/
 *.class
 *.jar
 *.war
 *.ear
-.idea/
 *.iml
-.project
-.classpath
-.settings/
-.vscode/
-
-
 *.log
-*.tmp
-*.swp
-*.swo
 
+##############################
+#   IDE / EDITOR FILES
+##############################
 
-.DS_Store
+# IntelliJ
+.idea/
+*.iws
+*.ipr
+*.iml
+
+# VS Code
+.vscode/
+.history/
+
+##############################
+#   OS FILES
+##############################
+
 Thumbs.db
+.DS_Store
 
+##############################
+#   ASSIGNMENT FILES (EXCLUDE)
+##############################
 
-.aws/
-*.pem
-*.key
-
-
-*.out
 input.txt
 output.html
+
+##############################
+#   JAVA / GENERAL
+##############################
+
+*.swp
+*.swo
+*.tmp
+*~
