@@ -57,11 +57,11 @@ The project is structured as a multi-module Maven system: **localapp**, **manage
 ## Input Format
 Each line is formatted as:
 
-<analysis-type> <TAB> <URL>
+<analysis-type>    <URL>
 
 Example:
-POS https://www.gutenberg.org/files/1659/1659-0.txt
-DEPENDENCY https://www.gutenberg.org/files/1342/1342-0.txt
+POS         https://www.gutenberg.org/files/1659/1659-0.txt
+DEPENDENCY  https://www.gutenberg.org/files/1342/1342-0.txt
 
 ---
 
@@ -78,8 +78,5 @@ DEPENDENCY: <input-url> <Exception: file unavailable>
 ---
 
 ## Running the Application
-
-### Command Line
-```bash
-java -jar localapp.jar <inputFile> <outputFile> <n> [terminate]
-
+Command Line:
+java -jar localapp/target/localapp-1.0-SNAPSHOT.jar <inputFile> <outputFile> <n> [terminate]
