@@ -57,7 +57,7 @@ The project is structured as a multi-module Maven system: **localapp**, **manage
 ## Input Format
 Each line is formatted as:
 
-<analysis-type>    <URL>
+analysis-type    URL
 
 Example:
 POS         https://www.gutenberg.org/files/1659/1659-0.txt
@@ -68,15 +68,16 @@ DEPENDENCY  https://www.gutenberg.org/files/1342/1342-0.txt
 ## Output Format
 Each line in the HTML summary follows:
 
-<analysis-type>: <input-url> <output-s3-url or exception>
+analysis-type: input-url output-s3-url or exception
 
 Example:
-POS: <input-url> <output-s3-url>
-CONSTITUENCY: <input-url> <output-s3-url>
-DEPENDENCY: <input-url> <Exception: file unavailable>
+POS: input-url output-s3-url
+CONSTITUENCY: input-url output-s3-url
+DEPENDENCY: input-url Exception: file unavailable
 
 ---
 
 ## Running the Application
 Command Line:
+```bash
 java -jar localapp/target/localapp-1.0-SNAPSHOT.jar <inputFile> <outputFile> <n> [terminate]
