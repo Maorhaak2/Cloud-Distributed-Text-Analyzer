@@ -22,12 +22,13 @@ public class Ec2Helper {
 
     private static final String managerTagName = "Manager";
     private static final String workerTagName  = "Worker";
-    private static final String ami = "ami-0c398cb65a93047f2"; // AMI מעודכן
+    private static final String ami = "ami-0c398cb65a93047f2"; 
     private static final String keyName = "vockey"; 
     private static final String iamProfile = "LabInstanceProfile"; 
     
-    // סוג מופע T3_MICRO
-    private static final InstanceType INSTANCE_TYPE = InstanceType.T3_MICRO;
+    private static final InstanceType MANAGER_INSTANCE_TYPE = InstanceType.T3_MICRO;
+    //private static final InstanceType WORKER_INSTANCE_TYPE = InstanceType.T3_MEDIUM;
+
 
     // ---------------------------------------------------------
     //  USER DATA BUILDER — משותף למנג'ר ולוורקר
@@ -88,7 +89,7 @@ public class Ec2Helper {
 
         RunInstancesRequest runRequest = RunInstancesRequest.builder()
                 .imageId(ami)
-                .instanceType(INSTANCE_TYPE)
+                .instanceType(MANAGER_INSTANCE_TYPE)
                 .minCount(1)
                 .maxCount(1)
                 .keyName(keyName)
@@ -119,7 +120,7 @@ public class Ec2Helper {
 
         RunInstancesRequest runRequest = RunInstancesRequest.builder()
                 .imageId(ami)
-                .instanceType(INSTANCE_TYPE)
+                .instanceType(MANAGER_INSTANCE_TYPE)
                 .minCount(1)
                 .maxCount(1)
                 .keyName(keyName)
@@ -143,40 +144,10 @@ public class Ec2Helper {
     // ---------------------------------------------------------
     //  CREATE WORKERS ONLY IF NEEDED
     // ---------------------------------------------------------
-    public static void createWorkersIfNeeded(int requiredCount) {
+    public static void createWorkers(int requiredCount) {
 
-        // 1. Count running workers
-        DescribeInstancesRequest req = DescribeInstancesRequest.builder()
-                .filters(
-                        Filter.builder().name("tag:Name").values(workerTagName).build(),
-                        Filter.builder().name("instance-state-name")
-                                .values("pending", "running").build()
-                ).build();
-
-        List<Instance> workers = ec2.describeInstances(req)
-                .reservations().stream()
-                .flatMap(r -> r.instances().stream())
-                .toList();
-
-        int running = workers.size();
-        int missing = requiredCount - running;
-
-        if (missing <= 0) {
-            System.out.println("[EC2] Enough workers running. Currently: " + running);
-            return;
-        }
-
-        // Max 19 instances (Manager + Workers). We limit Workers to 17 if Manager is 1.
-        // We assume the Manager itself is running (1 instance).
-        missing = Math.min(missing, 18 - running); // Changed from 17-running to 18-running based on 19 total limit. Manager is 1.
-        if (missing <= 0) {
-            System.out.println("[EC2] Max worker count reached. Not creating more.");
-            return;
-        }
-
-        System.out.println("[EC2] Creating " + missing + " new worker(s).");
-
-        for (int i = 0; i < missing; i++) {
+        System.out.println("[EC2] Creating " + requiredCount + " new worker(s).");
+        for (int i = 1; i <= requiredCount; i++) {
             startWorkerInstance();
         }
     }

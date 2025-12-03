@@ -17,13 +17,16 @@ public class MessageFormatter {
 
     public static String formatNewTask(String inputFileS3Path,
                                        int n,   
-                                       String callbackQueueName) {
+                                       String callbackQueueName,
+                                       boolean terminate) {
 
         return MessageType.NEW_TASK + TAB  
                 + inputFileS3Path + TAB
                 + n + TAB
-                + callbackQueueName;
+                + callbackQueueName + TAB
+                + (terminate ? "terminate" : "NOT-terminate");
     }
+
 
     // parse: NEW_TASK <inputS3> <n> <callbackQueue>
     public static NewTaskFields parseNewTask(String body) {
@@ -31,24 +34,16 @@ public class MessageFormatter {
         return new NewTaskFields(
                 p[1],               // inputFileS3Path
                 Integer.parseInt(p[2]),
-                p[3]                // callbackQueueName
+                p[3],               // callbackQueueName
+                p[4].equals("terminate")
         );
     }
 
     public record NewTaskFields(String inputFileS3,
                                 int n,
-                                String callbackQueue) {}
+                                String callbackQueue,
+                                boolean terminate) {}
 
-    public static String formatTerminate(String callbackQueue) {
-        return MessageType.TERMINATE + TAB + callbackQueue;
-    }
-
-    public static TerminateFields parseTerminate(String body) {
-        String[] p = body.split(TAB);
-        return new TerminateFields(p[1]);
-    }
-
-    public record TerminateFields(String callbackQueue) { }
 
 
     // ----------------------------------------------------
@@ -133,4 +128,51 @@ public class MessageFormatter {
 
     public record SummaryDoneFields(String jobId,
                                     String summaryS3Path) { }
+
+    // ----------------------------------------------------
+    //  WORKER → MANAGER   (ERROR)
+    // ----------------------------------------------------
+
+    public static String formatWorkerError(String jobId,
+                                        String analysisType,
+                                        String url,
+                                        String errorMsg) {
+
+        return MessageType.WORKER_ERROR + TAB
+                + jobId + TAB
+                + analysisType + TAB
+                + url + TAB
+                + sanitize(errorMsg);
+    }
+
+    // parse: WORKER_ERROR  <jobId> <analysisType> <url> <errorMsg>
+    public static WorkerErrorFields parseWorkerError(String body) {
+        String[] p = body.split(TAB, 5);  
+        // split into max 5 fields → חשוב כדי שההודעה לא תישבר
+
+        return new WorkerErrorFields(
+                p[1],   // jobId
+                p[2],   // analysisType
+                p[3],   // url
+                p[4]    // error message
+        );
+    }
+
+    // wrapper record
+    public record WorkerErrorFields(String jobId,
+                                    String analysisType,
+                                    String url,
+                                    String errorMsg) { }
+
+    // מנקה טאבים ושורות חדשות בהודעת שגיאה
+    private static String sanitize(String msg) {
+        if (msg == null)
+            return "Unknown error";
+
+        return msg
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .replace("\t", " ")
+                .trim();
+    }
 }

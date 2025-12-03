@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.UUID;
 
 import ass1.common.AWS;
 import ass1.common.MessageFormatter;
@@ -19,73 +20,103 @@ public class Worker {
 
     private static final String WORKER_TASKS_QUEUE = "worker-tasks-queue";
     private static final String WORKER_RESULTS_QUEUE = "worker-results-queue";
+
     private static final String BUCKET = AWS.getInstance().bucketName;
 
     public static void main(String[] args) {
+
+        // Worker identity (for logs)
+        String workerId = UUID.randomUUID().toString().substring(0, 6);
+        System.out.println("[WORKER " + workerId + "] Booted and ready.");
+
         String tasksQueueUrl = SqsHelper.createQueueIfNotExists(WORKER_TASKS_QUEUE);
         String resultsQueueUrl = SqsHelper.createQueueIfNotExists(WORKER_RESULTS_QUEUE);
 
-        System.out.println("[WORKER] Started. Waiting for ANALYZE messages...");
+        System.out.println("[WORKER " + workerId + "] Online. Awaiting ANALYZE tasks...");
 
         while (true) {
-            List<Message> messages = SqsHelper.receiveMessages(tasksQueueUrl, 5);
+
+            List<Message> messages =
+                    SqsHelper.receiveMessages(tasksQueueUrl, 1, 3600);  // 30 minutes visibility
 
             for (Message msg : messages) {
+
                 String body = msg.body();
                 MessageType type = MessageFormatter.getMessageType(body);
 
                 if (type != MessageType.ANALYZE) {
-                    System.out.println("[WORKER] Ignoring message of type: " + type);
+                    System.out.println("[WORKER " + workerId + "] Ignored non-ANALYZE: " + type);
                     SqsHelper.deleteMessage(tasksQueueUrl, msg.receiptHandle());
                     continue;
                 }
 
                 AnalyzeFields task = MessageFormatter.parseAnalyzeTask(body);
-
                 String analysisType = task.analysisType();
                 String url = task.url();
                 String jobId = task.jobId();
 
-                System.out.printf("[WORKER] Processing: %s %s [job: %s]%n",
-                        analysisType, url, jobId);
+                System.out.printf(
+                        "[WORKER %s] START | job=%s | type=%s | url=%s%n",
+                        workerId, jobId, analysisType, url
+                );
 
                 try {
-                    // 1) Download input text
+
+                    // 1) Download
                     Path inputPath = downloadUrlToTemp(url);
 
-                    // 2) Perform analysis
+                    // 2) Run analysis
                     Path resultFile = TextAnalyzer.performAnalysis(inputPath, analysisType);
 
-                    // 3) Upload result to S3
-                    String key = "results/" + jobId + "-" + analysisType + ".txt";
-                    S3Helper.uploadFile(BUCKET, key, resultFile);
+                    // 3) Upload to S3
+                    String uniqueKey = "results/" +
+                            jobId + "-" +
+                            analysisType + "-" +
+                            UUID.randomUUID() + ".txt";
 
-                    // 4) Send result message to manager
+                    S3Helper.uploadFile(BUCKET, uniqueKey, resultFile);
+
+                    // 4) Send DONE
                     String resultMessage = MessageFormatter.formatWorkerDone(
-                            jobId, analysisType, url, key);
+                            jobId, analysisType, url, uniqueKey);
+
+                    System.out.printf(
+                            "[WORKER %s] DONE | job=%s | type=%s | url=%s | key=%s%n",
+                            workerId, jobId, analysisType, url, uniqueKey
+                    );
 
                     SqsHelper.sendMessage(resultsQueueUrl, resultMessage);
-                    System.out.println("[WORKER] Sent result for job: " + jobId);
 
                 } catch (Exception e) {
-                    System.err.println("[WORKER] ERROR while processing job " + jobId);
-                    e.printStackTrace();
+
+                    System.err.printf(
+                            "[WORKER %s] ERROR | job=%s | type=%s | url=%s | reason=%s%n",
+                            workerId, jobId, analysisType, url, e.getMessage()
+                    );
+
+                    String errMsg = MessageFormatter.formatWorkerError(
+                            jobId, analysisType, url, e.getMessage());
+
+                    SqsHelper.sendMessage(resultsQueueUrl, errMsg);
                 }
 
+                // Always delete message after work
                 SqsHelper.deleteMessage(tasksQueueUrl, msg.receiptHandle());
             }
 
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException ignored) {}
+            try { Thread.sleep(300); }
+            catch (InterruptedException ignored) {}
         }
     }
 
+
     private static Path downloadUrlToTemp(String url) throws IOException {
-        System.out.println("[WORKER] Downloading URL: " + url);
+        System.out.println("[WORKER] Downloading: " + url);
         byte[] bytes = URI.create(url).toURL().openStream().readAllBytes();
+
         Path tmp = Paths.get("/tmp/input-" + System.nanoTime() + ".txt");
         Files.write(tmp, bytes);
+
         return tmp;
     }
 }

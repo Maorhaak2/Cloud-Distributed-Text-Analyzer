@@ -20,6 +20,8 @@ public class LocalApp {
             return;
         }
 
+        long start =  System.currentTimeMillis();
+
         String inputPath = args[0];
         String outputPath = args[1];
         int n = Integer.parseInt(args[2]);
@@ -45,12 +47,11 @@ public class LocalApp {
         System.out.println("[INFO] Uploaded input file to S3: " + s3Key);
 
         // Send NEW_TASK message to manager
-        String messageBody = terminate
-        ? MessageFormatter.formatTerminate(responseQueueName)
-        : MessageFormatter.formatNewTask(
+        String messageBody = MessageFormatter.formatNewTask(
                 "s3://" + BUCKET_NAME + "/" + s3Key,
                 n,
-                responseQueueName
+                responseQueueName,
+                terminate
         );
 
         String tasksQueueUrl = SqsHelper.createQueueIfNotExists("tasks-queue");
@@ -82,7 +83,9 @@ public class LocalApp {
             }
             Thread.sleep(2000); // Poll every 2 seconds
         }
-
+        
+        long end = System.currentTimeMillis();
+        System.out.println("[INFO] Total time: " + (end - start) + " ms");
         System.out.println("[INFO] LocalApp finished.");
     }
 }

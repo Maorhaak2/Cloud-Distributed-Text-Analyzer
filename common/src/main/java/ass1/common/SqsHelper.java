@@ -1,11 +1,16 @@
 package ass1.common;
 
-import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.*;
-import software.amazon.awssdk.regions.Region;
-
-import java.util.ArrayList;
 import java.util.List;
+
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
+import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
+import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 
 public class SqsHelper {
 
@@ -30,6 +35,18 @@ public class SqsHelper {
 
         return sqs.receiveMessage(request).messages();
     }
+
+    public static List<Message> receiveMessages(String queueUrl, int maxMessages, int visibilitySeconds) {
+        ReceiveMessageRequest request = ReceiveMessageRequest.builder()
+                .queueUrl(queueUrl)
+                .maxNumberOfMessages(maxMessages)
+                .waitTimeSeconds(10)        // Long polling
+                .visibilityTimeout(visibilitySeconds)
+                .build();
+
+        return sqs.receiveMessage(request).messages();
+    }
+
 
     public static void deleteMessage(String queueUrl, String receiptHandle) {
         DeleteMessageRequest request = DeleteMessageRequest.builder()

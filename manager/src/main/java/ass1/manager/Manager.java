@@ -16,7 +16,12 @@ import ass1.common.MessageFormatter;
 import ass1.common.MessageType;
 import ass1.common.S3Helper;
 import ass1.common.SqsHelper;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.regions.internal.util.EC2MetadataUtils;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.TerminateInstancesRequest;
 import software.amazon.awssdk.services.sqs.model.Message;
+
 
 public class Manager {
 
@@ -28,6 +33,8 @@ public class Manager {
     private final String workerTasksQueueUrl;
     private final String workerResultsQueueUrl;
 
+    
+
     // ======================================================================
     // SINGLE ThreadPool for all job tasks (NEW_TASK + TERMINATE)
     // ======================================================================
@@ -35,6 +42,9 @@ public class Manager {
 
     private final ConcurrentHashMap<String, Job> jobs = new ConcurrentHashMap<>();
     private volatile boolean acceptingNewTasks = true;
+    private volatile boolean shouldTerminate = false;
+
+    private AtomicInteger currentRunningWorkers = new AtomicInteger(0);
 
 
     public Manager() {
@@ -50,7 +60,7 @@ public class Manager {
         final int totalTasks;
         final ConcurrentHashMap<String, String> results = new ConcurrentHashMap<>();
         final AtomicInteger completed = new AtomicInteger(0);
-        final CompletableFuture<Void> finished = new CompletableFuture<>();
+        final CompletableFuture<Void> finished =    new CompletableFuture<>();
 
         Job(String jobId, String callbackQueue, int totalTasks) {
             this.jobId = jobId;
@@ -73,7 +83,7 @@ public class Manager {
 
 
     // ========================================================================
-    // LISTENER: LOCALAPP INPUT
+    // LISTENER: LOCALAPP INPUT (CLEAN VERSION)
     // ========================================================================
     private void startLocalAppListener() {
         Thread t = new Thread(() -> {
@@ -82,32 +92,25 @@ public class Manager {
             while (acceptingNewTasks || !jobs.isEmpty()) {
 
                 try {
-                    List<Message> messages = SqsHelper.receiveMessages(managerInputQueueUrl, 10);
+                    List<Message> messages =
+                            SqsHelper.receiveMessages(managerInputQueueUrl, 10);
 
                     for (Message msg : messages) {
 
                         MessageType type = MessageFormatter.getMessageType(msg.body());
 
-                        switch (type) {
+                        // אין טיפוסים אחרים — הכל NEW_TASK
+                        if (type == MessageType.NEW_TASK) {
 
-                            case NEW_TASK -> {
-                                if (acceptingNewTasks) {
-                                    System.out.println("[Manager] NEW_TASK received");
-
-                                    // submit NEW_TASK to jobPool
-                                    jobPool.submit(() -> handleNewTask(msg));
-
-                                } else {
-                                    System.out.println("[Manager] Ignoring NEW_TASK (termination mode)");
-                                }
+                            if (acceptingNewTasks) {
+                                System.out.println("[Manager] NEW_TASK received");
+                                jobPool.submit(() -> handleNewTask(msg));
+                            } else {
+                                System.out.println("[Manager] Ignoring NEW_TASK (termination mode)");
                             }
 
-                            case TERMINATE -> {
-                                System.out.println("[Manager] TERMINATE received");
-
-                                // submit TERMINATE to jobPool
-                                jobPool.submit(() -> handleTerminate(msg));
-                            }
+                        } else {
+                            System.out.println("[Manager] Ignored unexpected message type: " + type);
                         }
 
                         SqsHelper.deleteMessage(managerInputQueueUrl, msg.receiptHandle());
@@ -126,6 +129,7 @@ public class Manager {
     }
 
 
+
     // ========================================================================
     // LISTENER: WORKER RESULTS
     // ========================================================================
@@ -133,7 +137,7 @@ public class Manager {
         Thread t = new Thread(() -> {
             System.out.println("[Manager] WorkerResults Listener started.");
 
-            while (acceptingNewTasks || !jobs.isEmpty()) {
+            while (!jobs.isEmpty() || acceptingNewTasks) {
                 try {
                     List<Message> messages = SqsHelper.receiveMessages(workerResultsQueueUrl, 10);
 
@@ -158,22 +162,64 @@ public class Manager {
     // HANDLER: WORKER DONE
     // ========================================================================
     private void handleWorkerDone(String body) {
-        MessageFormatter.WorkerDoneFields f = MessageFormatter.parseWorkerDone(body);
 
-        Job job = jobs.get(f.jobId());
-        if (job == null)
-            return;
-        String jobKey = UUID.randomUUID().toString();
-        String value = f.analysisType() + "\t" + f.url() + "\t" + f.resultInfo();
-        job.results.put(jobKey, value);
+    MessageType type = MessageFormatter.getMessageType(body);
 
-        int done = job.completed.incrementAndGet();
-        System.out.println("[Manager] Job " + job.jobId + ": " + done + "/" + job.totalTasks);
+    switch (type) {
 
-        if (done == job.totalTasks) {
-            job.finished.complete(null);
+        // -------------------------------------------------------
+        // WORKER DONE (success)
+        // -------------------------------------------------------
+        case WORKER_DONE -> {
+            MessageFormatter.WorkerDoneFields f = MessageFormatter.parseWorkerDone(body);
+
+            Job job = jobs.get(f.jobId());
+            if (job == null) return;
+
+            String jobKey = UUID.randomUUID().toString();
+            String value = f.analysisType() + "\t" + f.url() + "\t" + f.resultInfo();
+
+            job.results.put(jobKey, value);
+
+            int done = job.completed.incrementAndGet();
+            System.out.println("[Manager] Job " + job.jobId + ": " + done + "/" + job.totalTasks);
+
+            if (done == job.totalTasks) {
+                job.finished.complete(null);
+            }
+        }
+
+        // -------------------------------------------------------
+        // WORKER ERROR (exception in worker)
+        // -------------------------------------------------------
+        case WORKER_ERROR -> {
+            MessageFormatter.WorkerErrorFields f = MessageFormatter.parseWorkerError(body);
+
+            Job job = jobs.get(f.jobId());
+            if (job == null) return;
+
+            // HTML format expects:
+            // <analysis>: <inputUrl> <short error text>
+            String jobKey = UUID.randomUUID().toString();
+            String value = f.analysisType() + "\t" + f.url() + "\t" + ("ERROR: " + f.errorMsg());
+
+            job.results.put(jobKey, value);
+
+            int done = job.completed.incrementAndGet();
+            System.out.println("[Manager] ERROR reported for job " + job.jobId
+                    + " (" + done + "/" + job.totalTasks + ")");
+
+            if (done == job.totalTasks) {
+                job.finished.complete(null);
+            }
+        }
+
+        default -> {
+            System.out.println("[Manager] Unexpected message type: " + type);
         }
     }
+}
+
 
 
     // ========================================================================
@@ -183,6 +229,10 @@ public class Manager {
 
         try {
             MessageFormatter.NewTaskFields f = MessageFormatter.parseNewTask(msg.body());
+            if (shouldTerminate) {
+                System.out.println("[Manager] NEW_TASK ignored — TERMINATE already requested.");
+                return;
+            }
 
             String fullS3 = f.inputFileS3();
             String bucket = AWS.getInstance().bucketName;
@@ -193,30 +243,59 @@ public class Manager {
 
             List<String> lines = java.nio.file.Files.readAllLines(temp);
 
+            // Keep only non-empty lines
+            List<String> nonEmptyLines = lines.stream()
+                    .map(String::trim)
+                    .filter(l -> !l.isEmpty())
+                    .toList();
+
+            // Create job
             String jobId = UUID.randomUUID().toString();
-            Job job = new Job(jobId, f.callbackQueue(), lines.size());
+            Job job = new Job(jobId, f.callbackQueue(), nonEmptyLines.size());
             jobs.put(jobId, job);
 
-            System.out.println("[Manager] Job created. " + lines.size() + " tasks.");
+            System.out.println("[Manager] Job created. " + nonEmptyLines.size() + " tasks.");
 
-            // send worker tasks
-            for (String line : lines) {
+            // Send tasks to workers
+            for (String line : nonEmptyLines) {
                 String[] p = line.split("\t");
-                String msgOut = MessageFormatter.formatAnalyzeTask(p[0], p[1], jobId);
+                String analysisType = p[0];
+                String url = p[1];
+
+                String msgOut = MessageFormatter.formatAnalyzeTask(analysisType, url, jobId);
                 SqsHelper.sendMessage(workerTasksQueueUrl, msgOut);
             }
 
-            // create workers if needed
-            int neededWorkers = (int) Math.ceil(lines.size() / (double) f.n());
-            Ec2Helper.createWorkersIfNeeded(neededWorkers);
+            // Create workers if needed
+            int neededWorkers = (int) Math.ceil(nonEmptyLines.size() / (double) f.n());
+            int requiredWorkers = Math.max(neededWorkers - currentRunningWorkers.get(), 0);
 
-            // wait for completion, then finish job
-            job.finished.whenComplete((r, ex) -> finishJob(jobId, bucket));
+            requiredWorkers = Math.min(18 - currentRunningWorkers.get(), requiredWorkers);
+            if (requiredWorkers > 0) {
+                currentRunningWorkers.addAndGet(requiredWorkers);
+                System.out.println("[Manager] Creating " + requiredWorkers + " new worker(s).");
+                Ec2Helper.createWorkers(requiredWorkers);
+            }
+            else {
+                System.out.println("[EC2] Enough workers running. Currently: " + currentRunningWorkers.get());
+            }
+
+            if(f.terminate()){
+                shouldTerminate = true;
+                acceptingNewTasks = false;
+                System.out.println("[Manager] TERMINATE flag activated — no more NEW_TASK will be accepted.");
+            }
+
+            // Wait for completion then finish job
+            job.finished.whenComplete((r, ex) -> {
+                finishJob(jobId, bucket);
+            });
 
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
+
 
 
     // ========================================================================
@@ -243,6 +322,12 @@ public class Manager {
 
             jobs.remove(jobId);
 
+            if(shouldTerminate && jobs.isEmpty()){
+                shutdownManager();
+            }
+
+            
+
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -252,22 +337,37 @@ public class Manager {
     // ========================================================================
     // TERMINATE
     // ========================================================================
-    private void handleTerminate(Message msg) {
 
-        acceptingNewTasks = false;
-
-        if (!jobs.isEmpty()) {
-            CompletableFuture.allOf(
-                    jobs.values().stream()
-                            .map(j -> j.finished)
-                            .toArray(CompletableFuture[]::new)
-            ).join();
-        }
+    private void shutdownManager() {
+        System.out.println("[Manager] TERMINATE — waiting for all running jobs...");
 
         Ec2Helper.terminateAllWorkers();
-        System.out.println("[Manager] All workers terminated. Manager shutting down.");
+        System.out.println("[Manager] All workers terminated.");
 
-        jobPool.shutdown();
+        try {
+            String instanceId = EC2MetadataUtils.getInstanceId();
+            System.out.println("[Manager] Self instance id: " + instanceId);
+
+            Ec2Client ec2 = Ec2Client.builder()
+                    .region(Region.US_EAST_1)
+                    .build();
+
+            ec2.terminateInstances(
+                    TerminateInstancesRequest.builder()
+                            .instanceIds(instanceId)
+                            .build()
+            );
+
+            System.out.println("[Manager] Termination request sent for Manager instance.");
+            ec2.close();
+        } catch (Exception e) {
+            System.err.println("[Manager] Failed to self-terminate: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        System.out.println("[Manager] Manager shutting down.");
         System.exit(0);
     }
+
+
 }
